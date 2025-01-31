@@ -80,10 +80,6 @@ impl<T: Chunk> ChunkData for CachedChunk<T> {
         self.inner.data()
     }
 
-    // fn into_data(self) -> Bytes {
-    //     self.inner.into_data()
-    // }
-
     fn size(&self) -> usize {
         self.inner.size()
     }
