@@ -1,3 +1,4 @@
+use alloy::primitives::BlockTimestamp;
 use alloy::primitives::SignatureError;
 use bytes::Bytes;
 use std::io;
@@ -5,47 +6,37 @@ use thiserror::Error;
 
 use crate::Chunk;
 
-/// Timestamp type for time-based operations
-pub type Timestamp = u64;
-
-/// Core authorization proof trait
+/// Fundamental proof of authorization for a chunk
 pub trait AuthProof: Send + Sync {
-    /// Get the raw proof data
     fn proof_data(&self) -> &Bytes;
 }
 
-/// Core trait for authorization validation
+/// Core authorization validation
 pub trait Authorizer: Send + Sync {
     type Proof: AuthProof;
 
-    /// Get total number of chunks this authorizer has authorized
+    /// Get total number of chunks held within storage by this authorizer
     fn authorized_chunk_count(&self) -> u64;
 
     /// Validate a proof for a chunk
     fn validate(&self, chunk: &impl Chunk, proof: &Self::Proof) -> AuthResult<()>;
 }
 
-/// Trait for time-bound authorizations that can expire
+/// Time-bound authorization capabilities
 pub trait TimeBoundAuthorizer: Authorizer {
-    /// Remove expired authorizations and return count of removed items
-    fn cleanup_expired(&mut self, now: Timestamp) -> AuthResult<u64>;
+    fn cleanup_expired(&mut self, now: BlockTimestamp) -> AuthResult<u64>;
 }
 
-/// Trait for authorizers that manage reserved storage
-pub trait Reserved: Authorizer {
-    /// Get total chunks reserved
-    fn reserved_chunks(&self) -> u64;
-
-    /// Get remaining chunk capacity
-    fn available_chunks(&self) -> u64;
-
-    /// Check if can reserve more chunks
-    fn can_authorize(&self) -> bool {
-        self.available_chunks() > 0
+/// Capacity-tracked authorization
+pub trait ResourceBoundAuthorizer: Authorizer {
+    fn total_capacity(&self) -> u64;
+    fn used_capacity(&self) -> u64;
+    fn available_capacity(&self) -> u64 {
+        self.total_capacity().saturating_sub(self.used_capacity())
     }
 }
 
-/// Trait for proof generation
+/// Authorization creation
 pub trait AuthProofGenerator: Send + Sync {
     type Proof: AuthProof;
 

@@ -1,232 +1,155 @@
-use std::collections::{HashMap, HashSet};
-
-use alloy::primitives::Bytes;
+use alloy::{
+    primitives::{Address, BlockNumber, BlockTimestamp, PrimitiveSignature, B256, U256},
+    signers::Signer,
+};
 use nectar_primitives_traits::{
-    AuthError, AuthProof, AuthResult, Authorizer, Chunk, ChunkAddress, Reserved,
-    TimeBoundAuthorizer, Timestamp,
+    AuthProof, AuthProofGenerator, AuthResult, Authorizer, Chunk, ResourceBoundAuthorizer,
+    TimeBoundAuthorizer,
 };
 
-/// Batch identifier
-#[derive(Clone, Hash, Eq, PartialEq)]
-pub struct BatchId([u8; 32]);
+pub type BatchId = B256;
 
-/// Postage stamp proof
-#[derive(Clone)]
-pub struct PostageProof {
-    batch_id: BatchId,
-    stamp_index: u32,
-    timestamp: Timestamp,
-    signature: PrimitiveSignature,
-}
-
-impl AuthProof for PostageProof {
-    fn proof_data(&self) -> &Bytes {
-        // Return serialized proof data
-    }
-}
-
-/// Information about a stamp batch
-struct BatchInfo {
-    /// When the batch expires
-    expires_at: Timestamp,
-    /// Total depth (2^depth = total stamps available)
+/// Core batch data structure representing paid-for storage capacity
+pub struct Batch {
+    /// The batch ID
+    id: BatchId,
+    /// The owner of the batch
+    owner: Address,
     depth: u8,
-    /// Amount paid per chunk
-    amount_per_chunk: u64,
-    /// Set of used stamp indices
-    used_stamps: HashSet<u32>,
-    /// Whether batch is immutable
+    bucket_depth: u8,
+    start_block: BlockNumber,
     immutable: bool,
 }
 
-impl BatchInfo {
-    fn is_valid(&self) -> bool {
-        !self.used_stamps.len() >= self.max_stamps()
-    }
-
-    fn max_stamps(&self) -> usize {
-        1 << self.depth
-    }
-
-    fn is_stamp_used(&self, index: u32) -> bool {
-        self.used_stamps.contains(&index)
-    }
-
-    fn use_stamp(&mut self, index: u32) -> bool {
-        if index as usize >= self.max_stamps() {
-            return false;
-        }
-        self.used_stamps.insert(index)
-    }
+pub struct PostageStamp {
+    batch: Batch,
+    index: u64,
+    timestamp: u64,
+    signature: PrimitiveSignature,
 }
 
-/// Maps chunk addresses to their stamp authorizations
-#[derive(Default)]
-struct ChunkAuthorizations {
-    /// Maps chunks to (batch_id, stamp_index) pairs
-    authorizations: HashMap<ChunkAddress, HashSet<(BatchId, u32)>>,
-    /// Total count of authorizations
-    total_count: u64,
-}
-
-impl ChunkAuthorizations {
-    fn add(&mut self, chunk: ChunkAddress, batch_id: BatchId, stamp_index: u32) {
-        if self
-            .authorizations
-            .entry(chunk)
-            .or_default()
-            .insert((batch_id, stamp_index))
-        {
-            self.total_count += 1;
-        }
-    }
-
-    fn remove_batch(&mut self, batch_id: &BatchId) -> u64 {
-        let mut removed = 0;
-        self.authorizations.retain(|_, auths| {
-            let before_len = auths.len();
-            auths.retain(|(bid, _)| bid != batch_id);
-            removed += before_len - auths.len();
-            !auths.is_empty()
-        });
-        self.total_count -= removed;
-        removed as u64
+impl AuthProof for PostageStamp {
+    fn proof_data(&self) -> &bytes::Bytes {
+        // Combines `batch_id`, `index`, `timestamp` and `signature` into a single byte array
+        todo!()
     }
 }
 
 pub struct PostageAuthorizer {
-    /// Active batches
-    batches: HashMap<BatchId, BatchInfo>,
-    /// Chunk authorizations
-    chunk_auths: ChunkAuthorizations,
-}
-
-impl PostageAuthorizer {
-    pub fn new() -> Self {
-        Self {
-            batches: HashMap::new(),
-            chunk_auths: ChunkAuthorizations::default(),
-        }
-    }
-
-    /// Add a new batch
-    pub fn add_batch(
-        &mut self,
-        id: BatchId,
-        depth: u8,
-        expires_at: Timestamp,
-        amount_per_chunk: u64,
-        immutable: bool,
-    ) -> AuthResult<()> {
-        if self.batches.contains_key(&id) {
-            return Err(AuthError::InvalidState("batch already exists"));
-        }
-
-        self.batches.insert(
-            id,
-            BatchInfo {
-                expires_at,
-                depth,
-                amount_per_chunk,
-                used_stamps: HashSet::new(),
-                immutable,
-            },
-        );
-
-        Ok(())
-    }
+    batch_store: BatchStore,
+    chain_state: ChainState,
 }
 
 impl Authorizer for PostageAuthorizer {
-    type Proof = PostageProof;
-
-    fn authorized_chunk_count(&self) -> u64 {
-        self.chunk_auths.total_count
-    }
+    type Proof = PostageStamp;
 
     fn validate(&self, chunk: &impl Chunk, proof: &Self::Proof) -> AuthResult<()> {
-        let batch = self
-            .batches
-            .get(&proof.batch_id)
-            .ok_or(AuthError::InvalidProof("batch not found"))?;
+        // 1. Retrieve batch
+        let batch = self.batch_store.get(proof.batch_id)?;
 
-        // Check batch validity
-        if batch.expires_at <= proof.timestamp {
-            return Err(AuthError::Expired);
-        }
+        // 2. Verify batch is valid
+        self.verify_batch_valid(&batch)?;
 
-        // Verify stamp hasn't been used
-        if batch.is_stamp_used(proof.stamp_index) {
-            return Err(AuthError::InvalidProof("stamp already used"));
-        }
+        // 3. Verify stamp signature against batch owner
+        self.verify_signature(chunk, proof, &batch)?;
 
-        // Verify stamp index is within batch depth
-        if proof.stamp_index as usize >= batch.max_stamps() {
-            return Err(AuthError::InvalidProof("invalid stamp index"));
-        }
-
-        // Verify proof signature
-        proof.verify_signature().map_err(AuthError::Crypto)?;
+        // 4. Verify bucket assignment and capacity
+        self.verify_bucket_capacity(chunk, proof, &batch)?;
 
         Ok(())
     }
 }
 
 impl TimeBoundAuthorizer for PostageAuthorizer {
-    fn cleanup_expired(&mut self, now: Timestamp) -> AuthResult<u64> {
-        let expired_batches: Vec<BatchId> = self
-            .batches
-            .iter()
-            .filter(|(_, info)| info.expires_at <= now)
-            .map(|(id, _)| id.clone())
-            .collect();
+    fn cleanup_expired(&mut self, now: BlockTimestamp) -> AuthResult<u64> {
+        let mut removed = 0;
 
-        let mut total_cleaned = 0;
-        for batch_id in expired_batches {
-            self.batches.remove(&batch_id);
-            total_cleaned += self.chunk_auths.remove_batch(&batch_id);
-        }
+        // Cleanup batches that are expired based on:
+        // - Chain state total amount exceeding batch value
+        // - Block number thresholds
+        // - Any other time-based expiry conditions
 
-        Ok(total_cleaned)
+        Ok(removed)
     }
 }
 
-impl Reserved for PostageAuthorizer {
-    fn reserved_chunks(&self) -> u64 {
-        self.batches
-            .values()
-            .map(|batch| batch.max_stamps() as u64)
+impl ResourceBoundAuthorizer for PostageAuthorizer {
+    fn total_capacity(&self) -> u64 {
+        // Sum of all valid batch capacities
+        self.batch_store
+            .valid_batches()
+            .map(|b| 2u64.pow(b.depth as u32))
             .sum()
     }
 
-    fn available_chunks(&self) -> u64 {
-        self.reserved_chunks() - self.authorized_chunk_count()
+    fn used_capacity(&self) -> u64 {
+        // Track usage across all batches
+        self.batch_store
+            .valid_batches()
+            .map(|b| b.utilized_capacity())
+            .sum()
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// Handles stamp creation within a batch
+pub struct PostageGenerator {
+    batch: Batch,
+    signer: Signer,
+    bucket_tracker: BucketTracker,
+}
 
-    #[test]
-    fn test_batch_expiry() {
-        let mut auth = PostageAuthorizer::new();
+impl AuthProofGenerator for PostageGenerator {
+    type Proof = PostageStamp;
 
-        // Add batch that expires at t=100
-        auth.add_batch(
-            BatchId([0; 32]),
-            8,    // depth
-            100,  // expires_at
-            1000, // amount per chunk
-            true, // immutable
-        )
-        .unwrap();
+    fn generate_proof(&self, chunk: &impl Chunk) -> AuthResult<Self::Proof> {
+        // 1. Check batch still has capacity
+        if !self.has_available_capacity() {
+            return Err(AuthError::CapacityExceeded);
+        }
 
-        // Cleanup at t=50 should do nothing
-        assert_eq!(auth.cleanup_expired(50).unwrap(), 0);
+        // 2. Calculate bucket and index
+        let (bucket, index) = self.bucket_tracker.next_index(chunk)?;
 
-        // Cleanup at t=150 should remove the batch
-        assert_eq!(auth.cleanup_expired(150).unwrap(), 0);
-        assert!(auth.batches.is_empty());
+        // 3. Create and sign stamp
+        let stamp = PostageStamp {
+            batch_id: self.batch.id,
+            index: index.to_bytes(),
+            timestamp: now().to_bytes(),
+            signature: self.sign(chunk, index)?,
+        };
+
+        // 4. Update bucket usage
+        self.bucket_tracker.record_usage(bucket)?;
+
+        Ok(stamp)
     }
+}
+
+struct BucketTracker {
+    buckets: Vec<u32>,
+    depth: u8,
+    bucket_depth: u8,
+}
+
+impl BucketTracker {
+    fn next_index(&self, chunk: &impl Chunk) -> AuthResult<(u32, u32)> {
+        // Calculate bucket and next available index
+        todo!()
+    }
+
+    fn record_usage(&mut self, bucket: u32) -> AuthResult<()> {
+        // Track usage in bucket
+        todo!()
+    }
+}
+
+struct ChainState {
+    block: BlockNumber,
+    total_amount: U256,
+    current_price: U256,
+}
+
+trait BatchStore {
+    fn get(&self, id: &[u8]) -> AuthResult<Batch>;
+    fn valid_batches(&self) -> impl Iterator<Item = &Batch>;
 }
