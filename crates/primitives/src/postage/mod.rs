@@ -9,31 +9,10 @@ use nectar_primitives_traits::{
 
 pub type BatchId = B256;
 
-/// Core batch data structure representing paid-for storage capacity
-pub struct Batch {
-    /// The batch ID
-    id: BatchId,
-    /// The owner of the batch
-    owner: Address,
-    depth: u8,
-    bucket_depth: u8,
-    start_block: BlockNumber,
-    immutable: bool,
-}
-
-pub struct PostageStamp {
-    batch: Batch,
-    index: u64,
-    timestamp: u64,
-    signature: PrimitiveSignature,
-}
-
-impl AuthProof for PostageStamp {
-    fn proof_data(&self) -> &bytes::Bytes {
-        // Combines `batch_id`, `index`, `timestamp` and `signature` into a single byte array
-        todo!()
-    }
-}
+mod batch;
+mod stamp;
+pub use batch::*;
+pub use stamp::*;
 
 pub struct PostageAuthorizer {
     batch_store: BatchStore,
