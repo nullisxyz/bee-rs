@@ -19,6 +19,7 @@ members = [
     # "bin/swarm-wasm-lib",
     "crates/primitives",
     "crates/primitives-traits",
+    "crates/storage",
 ]
 # default-members = [
 #     "bin/vertex",
@@ -36,6 +37,9 @@ rust.unreachable_pub = "warn"
 ## nectar
 nectar-primitives = { path = "crates/primitives" }
 nectar-primitives-traits = { path = "crates/primitives-traits" }
+
+## vertex
+vertex-storage = { path = "crates/storage" }
 
 ## alloy
 alloy = { version = "0.11", features = [
@@ -93,3 +97,7 @@ futures = "0.3"
 # async-recursion = "1.1.1"
 anyhow = "1.0.94"
 # prost = "0.13.4"
+
+serde = { version = "1.0", default-features = false }
+serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
+serde_with = { version = "3", default-features = false, features = ["macros"] }
