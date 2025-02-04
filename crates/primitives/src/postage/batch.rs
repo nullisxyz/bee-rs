@@ -116,7 +116,7 @@ impl Batch {
         2_u64.pow((self.depth - self.bucket_depth) as u32)
     }
 
-    /// Calculates the cost of a batch given the target duration and current storage price.
+    /// Calculates the cost of a batch for the additional target duration and current storage price.
     #[must_use]
     pub fn cost(&self, duration_blocks: impl Into<Duration>, price: U256) -> Result<U256> {
         let chunks = Self::chunks(self.depth);
@@ -289,6 +289,14 @@ impl BatchBuilder<WithOwner> {
 
         self.with_id(hasher.finalize())
     }
+
+    /// Derives the ID of the batch given a string (`nonce` = `H(string)`).
+    pub fn with_id_derived_from_string(self, string: &str) -> BatchBuilder<WithId> {
+        let mut hasher = Keccak256::new();
+        hasher.update(string);
+
+        self.with_id_derived_from_nonce(hasher.finalize())
+    }
 }
 
 impl BatchBuilder<WithId> {
@@ -367,29 +375,50 @@ impl From<u64> for Duration {
 mod tests {
     use super::*;
 
+    use alloy::signers::local::PrivateKeySigner;
+
+    fn get_test_signer() -> PrivateKeySigner {
+        PrivateKeySigner::random()
+    }
+
     #[test]
     fn test_batch_builder() {
         // Manual configuration
-        let batch1 = BatchBuilder::new()
-            .with_owner(Address::ZERO)
-            // .with_signer(Signer::new(Address::zero()))
-            .with_id_derived_from_nonce(B256::left_padding_from("test".to_string().as_bytes()))
+        let signer = get_test_signer();
+        println!("Test signer: {}", signer.address());
+
+        let batch = BatchBuilder::new()
+            .with_signer(signer)
+            .with_id_derived_from_string("test")
             .with_value(U256::from(100))
             .with_depths(20, 16)
             .expect("Invalid depth")
             .build();
 
-        assert_eq!(batch1.value, Some(U256::from(100)));
+        assert_eq!(batch.value, Some(U256::from(100)));
 
-        // Automatic size and value calculation
+        let batch_extension_cost = batch.cost(
+            Duration::Time {
+                secs: 86400 * 30,
+                block_time: 5,
+            },
+            U256::from(24000),
+        );
+
+        println!("Batch: {:?}", batch);
+        println!("Batch extension cost: {:?}", batch_extension_cost);
+
+        // Automatic size calculation and cost estimation
         let batch2 = BatchBuilder::new()
             .with_immutable(true)
             .with_owner(Address::ZERO)
-            // .with_signer(Signer::new(Address::zero()))
             .with_id(BatchId::ZERO)
             .auto_size(1 << 20)
             .expect("Invalid size") // 1 MiB
             .build();
+        println!("Batch 2: {:?}", batch2);
+
+        //
 
         assert!(batch2.immutable());
     }
